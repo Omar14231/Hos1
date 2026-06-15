@@ -4,6 +4,14 @@
 // ضع التوكن في متغير البيئة DISCORD_TOKEN في Render
 // ============================
 
+// HTTP Server لـ Render (مطلوب حتى لا يوقف الخدمة)
+const http = require("http");
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("Bot is running! ✅");
+}).listen(PORT, () => console.log(`🌐 HTTP Server على البورت ${PORT}`));
+
 const { Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, AttachmentBuilder, ChannelType, PermissionOverwrites } = require("discord.js");
 
 const client = new Client({
