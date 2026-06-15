@@ -1,13 +1,16 @@
 {
-  "name": "discord-bank-bot",
-  "version": "2.0.0",
-  "description": "بوت ديسكورد البنك الرسمي - نسخة محسّنة",
+  "name": "central-bank-bot",
+  "version": "1.0.0",
+  "description": "Central Bank Discord Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1"
+    "discord.js": "^14.14.1",
+    "canvas": "^2.11.2",
+    "gifencoder": "^2.0.1",
+    "@napi-rs/canvas": "^0.1.51"
   },
   "engines": {
     "node": ">=18.0.0"
