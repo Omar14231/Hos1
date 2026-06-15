@@ -1,7 +1,7 @@
 {
   "name": "discord-bank-bot",
-  "version": "1.0.0",
-  "description": "بوت ديسكورد البنك الرسمي",
+  "version": "2.0.0",
+  "description": "بوت ديسكورد البنك الرسمي - نسخة محسّنة",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
