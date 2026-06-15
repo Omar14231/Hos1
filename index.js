@@ -1,81 +1,70 @@
 const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  PermissionsBitField,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  EmbedBuilder,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  ChannelType,
+  Client, GatewayIntentBits, Partials,
+  PermissionsBitField, ActionRowBuilder, ButtonBuilder,
+  ButtonStyle, EmbedBuilder, ModalBuilder,
+  TextInputBuilder, TextInputStyle, ChannelType,
 } = require("discord.js");
+const http = require("http");
 
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers,
     GatewayIntentBits.DirectMessages,
   ],
   partials: [Partials.Channel, Partials.Message],
 });
 
-// ════════════════════════════════════════
-//   إعدادات البوت
-// ════════════════════════════════════════
+// ══════════════════════════════════════════════
+//  إعدادات
+// ══════════════════════════════════════════════
 const KING_ID = "1344009623887151155";
-const kings = new Set([KING_ID]);
+const kings   = new Set([KING_ID]);
 
-// قاعدة البيانات في الذاكرة
-const balances  = {};   // { userId: number }
-const storage   = {};   // { userId: number } — المخزنة
-const cooldowns = {};   // { userId_cmd: timestamp }
+const balances  = {};
+const storage   = {};
+const cooldowns = {};
 
 let supportRoleId    = null;
 let ticketCategoryId = null;
 let ticketCounter    = 0;
-let bankChannelId    = null; // روم أوامر البنك (!روم)
+let bankChannelId    = null;
 
-// مدة الكول‑داون لكل أمر ربح (بالمللي‑ثانية)  5–10 دقايق عشوائي
-function getCooldownTime() {
-  return (Math.floor(Math.random() * 6) + 5) * 60 * 1000; // 5–10 دقائق
-}
-
-// ════════════════════════════════════════
-//   مساعدات عامة
-// ════════════════════════════════════════
-function isKing(userId)       { return kings.has(userId); }
-function getBalance(userId)   { return balances[userId] || 0; }
-function getStorage(userId)   { return storage[userId]  || 0; }
+// ══════════════════════════════════════════════
+//  مساعدات
+// ══════════════════════════════════════════════
+const isKing     = id => kings.has(id);
+const getBalance = id => balances[id] || 0;
+const getStorage = id => storage[id]  || 0;
 
 function parseAmount(str) {
   if (!str) return NaN;
-  str = str
-    .replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
-    .replace(/,/g, "")
-    .trim()
-    .toLowerCase();
+  str = str.replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+           .replace(/,/g, "").trim().toLowerCase();
   if (str.endsWith("k")) return parseFloat(str) * 1000;
   return parseFloat(str);
 }
 
 function formatAmount(num) {
-  if (num >= 1000) return (num / 1000).toLocaleString("ar-SA") + "k ريال";
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + "M ريال";
+  if (num >= 1000)    return (num / 1000).toFixed(1)    + "k ريال";
   return num.toLocaleString("ar-SA") + " ريال";
 }
 
-function formatMs(ms) {
-  const m = Math.ceil(ms / 60000);
-  return `${m} دقيقة`;
+function formatMs(ms) { return `${Math.ceil(ms / 60000)} دقيقة`; }
+
+async function sendTemp(channel, text, delay = 6000) {
+  const m = await channel.send(text).catch(() => null);
+  if (m) setTimeout(() => m.delete().catch(() => {}), delay);
 }
 
-async function sendTemp(message, text, delay = 6000) {
-  const m = await message.channel.send(text).catch(() => null);
-  if (m) setTimeout(() => m.delete().catch(() => {}), delay);
+function checkCooldown(userId, cmd, ms) {
+  const key    = `${userId}_${cmd}`;
+  const expiry = cooldowns[key] || 0;
+  const now    = Date.now();
+  if (now < expiry) return { ok: false, remaining: expiry - now };
+  cooldowns[key] = now + ms;
+  return { ok: true };
 }
 
 function hasRole(interaction, roleId) {
@@ -83,259 +72,73 @@ function hasRole(interaction, roleId) {
   return interaction.member?.roles?.cache?.has(roleId);
 }
 
-// تحقق من الكول‑داون، يرجع { ok, remaining }
-function checkCooldown(userId, cmd) {
-  const key  = `${userId}_${cmd}`;
-  const now  = Date.now();
-  const last = cooldowns[key] || 0;
-  const cd   = getCooldownTime();
-  // نحفظ وقت الكول‑داون الخاص بكل مستخدم وأمر
-  const expiry = cooldowns[`${key}_exp`] || 0;
-  if (now < expiry) return { ok: false, remaining: expiry - now };
-  // سجّل الوقت الجديد
-  const newCd = getCooldownTime();
-  cooldowns[`${key}_exp`] = now + newCd;
-  return { ok: true };
-}
+// ══════════════════════════════════════════════
+//  لعبة الألوان — ألوان Unicode boxes
+//  نستخدم مربعات ملونة Unicode لتكون مثل الصورة تماماً
+// ══════════════════════════════════════════════
 
-// ════════════════════════════════════════
-//   أوامر الربح (البنك)
-// ════════════════════════════════════════
+// الألوان كـ emojis واضحة
+const COLORS = {
+  yellow: "🟨",
+  purple: "🟪",
+  brown:  "🟫",
+  blue:   "🟦",
+  red:    "🟥",
+};
+const COLOR_LIST = ["yellow", "purple", "brown", "blue", "red"];
 
-// راتب: 100–1578
-async function cmdRatib(message) {
-  const userId = message.author.id;
-  const cd = checkCooldown(userId, "راتب");
-  if (!cd.ok) {
-    return sendTemp(message, `⏳ <@${userId}> لازم تنتظر **${formatMs(cd.remaining)}** قبل تاخذ راتبك!`);
-  }
-  const amount = Math.floor(Math.random() * (1578 - 100 + 1)) + 100;
-  balances[userId] = getBalance(userId) + amount;
+// أسماء الألوان بالعربي
+const COLOR_NAMES_AR = {
+  yellow: "🟨 أصفر",
+  purple: "🟪 بنفسجي",
+  brown:  "🟫 بني",
+  blue:   "🟦 أزرق",
+  red:    "🟥 أحمر",
+};
 
-  const embed = new EmbedBuilder()
-    .setTitle("💵 راتبك وصل!")
-    .setColor(0x57f287)
-    .setDescription(`<@${userId}> استلمت راتبك الشهري!`)
-    .addFields(
-      { name: "💰 المبلغ", value: formatAmount(amount), inline: true },
-      { name: "🏦 رصيدك الحالي", value: formatAmount(getBalance(userId)), inline: true }
-    )
-    .setFooter({ text: "البنك الرسمي • أوامر الربح" })
-    .setTimestamp();
-  await message.channel.send({ embeds: [embed] });
-}
-
-// ماين: 50–900
-async function cmdMine(message) {
-  const userId = message.author.id;
-  const cd = checkCooldown(userId, "ماين");
-  if (!cd.ok) {
-    return sendTemp(message, `⏳ <@${userId}> المعدن ما نضج بعد، انتظر **${formatMs(cd.remaining)}**!`);
-  }
-  const win  = Math.random() > 0.25; // 75% ربح
-  const amount = Math.floor(Math.random() * (900 - 50 + 1)) + 50;
-
-  if (win) {
-    balances[userId] = getBalance(userId) + amount;
-    const embed = new EmbedBuilder()
-      .setTitle("⛏️ التعدين")
-      .setColor(0xfee75c)
-      .setDescription(`<@${userId}> حفرت وحصلت على كنز!`)
-      .addFields(
-        { name: "💎 الربح", value: formatAmount(amount), inline: true },
-        { name: "🏦 الرصيد", value: formatAmount(getBalance(userId)), inline: true }
-      )
-      .setTimestamp();
-    await message.channel.send({ embeds: [embed] });
-  } else {
-    const loss = Math.floor(Math.random() * 200) + 50;
-    const actual = Math.min(loss, getBalance(userId));
-    balances[userId] = getBalance(userId) - actual;
-    const embed = new EmbedBuilder()
-      .setTitle("⛏️ التعدين")
-      .setColor(0xed4245)
-      .setDescription(`<@${userId}> الحفرة انهارت عليك! خسرت ${formatAmount(actual)}`)
-      .addFields({ name: "🏦 الرصيد", value: formatAmount(getBalance(userId)), inline: true })
-      .setTimestamp();
-    await message.channel.send({ embeds: [embed] });
-  }
-}
-
-// صاروخ: مضاعفة عالية أو خسارة
-async function cmdSaroukh(message, args) {
-  const userId = message.author.id;
-  const betRaw = args[1];
-  if (!betRaw) return sendTemp(message, "❌ الاستخدام: `-صاروخ المبلغ`");
-
-  // دعم "ذكر المبلغ" كنص
-  const bet = parseAmount(betRaw);
-  if (isNaN(bet) || bet <= 0) return sendTemp(message, "❌ اكتب مبلغاً صحيحاً");
-  if (getBalance(userId) < bet) return sendTemp(message, "❌ رصيدك ما يكفي!");
-
-  const cd = checkCooldown(userId, "صاروخ");
-  if (!cd.ok) {
-    return sendTemp(message, `⏳ الصاروخ في إعادة تحميل، انتظر **${formatMs(cd.remaining)}**!`);
-  }
-
-  const multiplier = [1.5, 2, 2.5, 3, 0, 0.5][Math.floor(Math.random() * 6)];
-  const gain = Math.floor(bet * multiplier);
-
-  balances[userId] = getBalance(userId) - bet + gain;
-
-  let color, title, desc;
-  if (multiplier === 0) {
-    color = 0xed4245; title = "🚀💥 الصاروخ انفجر!";
-    desc  = `خسرت كل رهانك ${formatAmount(bet)}`;
-  } else if (multiplier < 1) {
-    color = 0xff9d00; title = "🚀 الصاروخ اهبط مبكر";
-    desc  = `خسرت نص الرهان، استردت ${formatAmount(gain)}`;
-  } else if (multiplier >= 3) {
-    color = 0x57f287; title = "🚀🌟 الصاروخ وصل الفضاء!";
-    desc  = `ربحت **${multiplier}x** = ${formatAmount(gain)}`;
-  } else {
-    color = 0x57f287; title = "🚀 الصاروخ طار!";
-    desc  = `ربحت **${multiplier}x** = ${formatAmount(gain)}`;
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setColor(color)
-    .setDescription(`<@${userId}> ${desc}`)
-    .addFields(
-      { name: "💵 الرهان", value: formatAmount(bet), inline: true },
-      { name: "🏦 الرصيد", value: formatAmount(getBalance(userId)), inline: true }
-    )
-    .setTimestamp();
-  await message.channel.send({ embeds: [embed] });
-}
-
-// لعبة: أحجية عشوائية
-const GAMES = [
-  { q: "🎲 فردي أم زوجي؟ اكتب `فردي` أو `زوجي`", answers: () => {
-    const n = Math.floor(Math.random() * 10) + 1;
-    return { correct: n % 2 === 0 ? "زوجي" : "فردي", result: `الرقم كان ${n}` };
-  }},
-  { q: "🪙 صورة أو كتابة؟ اكتب `صورة` أو `كتابة`", answers: () => {
-    const r = Math.random() > 0.5 ? "صورة" : "كتابة";
-    return { correct: r, result: `الطلعت ${r}` };
-  }},
-];
-
-async function cmdGame(message) {
-  const userId = message.author.id;
-  const cd = checkCooldown(userId, "لعبه");
-  if (!cd.ok) {
-    return sendTemp(message, `⏳ <@${userId}> العبة مو جاهزة، انتظر **${formatMs(cd.remaining)}**!`);
-  }
-
-  const game    = GAMES[Math.floor(Math.random() * GAMES.length)];
-  const answers = game.answers();
-  const prize   = Math.floor(Math.random() * 800) + 200;
-
-  const askMsg = await message.channel.send({
-    embeds: [
-      new EmbedBuilder()
-        .setTitle("🎮 لعبة البنك")
-        .setColor(0x5865f2)
-        .setDescription(`<@${userId}> ${game.q}\n💰 الجائزة: **${formatAmount(prize)}**\n⏱️ عندك 20 ثانية!`)
-        .setTimestamp()
-    ]
-  });
-
-  const filter  = m => m.author.id === userId;
-  const collector = message.channel.createMessageCollector({ filter, time: 20000, max: 1 });
-
-  collector.on("collect", async m => {
-    await m.delete().catch(() => {});
-    await askMsg.delete().catch(() => {});
-    const answer = m.content.trim().toLowerCase();
-    if (answer === answers.correct) {
-      balances[userId] = getBalance(userId) + prize;
-      await message.channel.send({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("🎉 صح! ربحت!")
-            .setColor(0x57f287)
-            .setDescription(`${answers.result}\n<@${userId}> ربحت **${formatAmount(prize)}**\n🏦 رصيدك: **${formatAmount(getBalance(userId))}**`)
-            .setTimestamp()
-        ]
-      });
-    } else {
-      const loss = Math.floor(Math.random() * 200) + 100;
-      const actual = Math.min(loss, getBalance(userId));
-      balances[userId] = getBalance(userId) - actual;
-      await message.channel.send({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("❌ غلط! خسرت!")
-            .setColor(0xed4245)
-            .setDescription(`${answers.result}\n<@${userId}> خسرت **${formatAmount(actual)}**\n🏦 رصيدك: **${formatAmount(getBalance(userId))}**`)
-            .setTimestamp()
-        ]
-      });
+// توليد لوحة 10×10 مثل الصورة (الأصفر يسيطر ~60%)
+function generateColorBoard() {
+  const board = [];
+  for (let r = 0; r < 10; r++) {
+    const row = [];
+    for (let c = 0; c < 10; c++) {
+      if (Math.random() < 0.60) {
+        row.push("yellow");
+      } else {
+        const others = COLOR_LIST.filter(c => c !== "yellow");
+        row.push(others[Math.floor(Math.random() * others.length)]);
+      }
     }
-  });
-
-  collector.on("end", collected => {
-    if (collected.size === 0) {
-      askMsg.delete().catch(() => {});
-      message.channel.send(`⏰ <@${userId}> انتهى الوقت، خسرت فرصتك!`).then(m => {
-        setTimeout(() => m.delete().catch(() => {}), 5000);
-      });
-    }
-  });
-}
-
-// ════════════════════════════════════════
-//   قوائم الأوامر
-// ════════════════════════════════════════
-function buildHelpEmbed(isKingUser) {
-  const memberCmds = [
-    { name: "راتب",              value: "تاخذ راتب يومي بين 100–1578 ريال" },
-    { name: "-ماين",             value: "تعدين: اربح أو اخسر" },
-    { name: "-صاروخ [مبلغ]",    value: "راهن واضرب حتى 3x أو انفجر" },
-    { name: "-لعبه",             value: "لعبة تخمين، اربح أو اخسر" },
-    { name: "-رصيد [@شخص]",     value: "اعرض رصيدك أو رصيد شخص" },
-    { name: "-تحويل @شخص مبلغ", value: "حوّل من رصيدك لشخص آخر" },
-    { name: "-تعال @شخص",        value: "إشعار شخص في خاص" },
-    { name: "-اوامر",            value: "قائمة أوامر الأعضاء" },
-  ];
-
-  const kingCmds = [
-    { name: "!أبدأ٧٧",                  value: "إعداد روم التذاكر + رتبة الدعم" },
-    { name: "!روم",                      value: "تخصيص الروم الحالي كروم أوامر البنك" },
-    { name: "-ارسال @شخص مبلغ",         value: "إرسال مبلغ لشخص" },
-    { name: "-سحب @شخص مبلغ",           value: "سحب من رصيد شخص" },
-    { name: "!مخزنة @شخص مبلغ",         value: "حفظ مبلغ في خزنة شخص" },
-    { name: "!جيب @شخص مبلغ",           value: "سحب من الخزنة للرصيد" },
-    { name: "-صديق @شخص",               value: "منح شخص صلاحيات الملك" },
-    { name: "!اوامر",                    value: "قائمة أوامر الملوك الكاملة" },
-  ];
-
-  const embed = new EmbedBuilder()
-    .setTitle("📋 أوامر البنك الرسمي")
-    .setColor(0x5865f2)
-    .setFooter({ text: "البنك الرسمي • كل الأوامر لها كول‑داون 5–10 دقايق" })
-    .setTimestamp();
-
-  const memberField = memberCmds.map(c => `\`${c.name}\` — ${c.value}`).join("\n");
-  embed.addFields({ name: "👥 أوامر الأعضاء", value: memberField });
-
-  if (isKingUser) {
-    const kingField = kingCmds.map(c => `\`${c.name}\` — ${c.value}`).join("\n");
-    embed.addFields({ name: "👑 أوامر الملوك", value: kingField });
+    board.push(row);
   }
-
-  return embed;
+  return board;
 }
 
-// ════════════════════════════════════════
-//   حدث: رسالة جديدة
-// ════════════════════════════════════════
-client.once("ready", () => {
+// تحويل اللوحة لنص emojis
+function boardToString(board) {
+  return board.map(row => row.map(c => COLORS[c]).join("")).join("\n");
+}
+
+// عد لون معين في اللوحة
+function countColor(board, color) {
+  return board.flat().filter(c => c === color).length;
+}
+
+// ══════════════════════════════════════════════
+//  جلسات الألوان
+// ══════════════════════════════════════════════
+const colorSessions = {};
+
+// ══════════════════════════════════════════════
+//  READY
+// ══════════════════════════════════════════════
+client.once("clientReady", () => {
   console.log(`✅ البوت شغال: ${client.user.tag}`);
 });
 
+// ══════════════════════════════════════════════
+//  messageCreate
+// ══════════════════════════════════════════════
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
@@ -344,383 +147,526 @@ client.on("messageCreate", async (message) => {
   const cmd     = args[0];
   const userId  = message.author.id;
 
-  // ── تحقق: هل الروم مخصص للبنك؟ (للأوامر التي تحتاج ذلك)
-  const earnCmds = ["راتب", "-ماين", "-صاروخ", "-لعبه"];
-  if (earnCmds.includes(cmd) && bankChannelId && message.channel.id !== bankChannelId) {
-    return sendTemp(message, `❌ استخدم أوامر البنك في <#${bankChannelId}> فقط!`);
-  }
-
-  // ════════════════════════════════════
-  //  !روم — للملوك: تخصيص الروم للبنك
-  // ════════════════════════════════════
-  if (cmd === "!روم") {
+  // ══════════════════════
+  //  !روم — للملوك
+  //  يحفظ الروم ويحذف الرسالة، ويرسل embed الأوامر
+  // ══════════════════════
+  if (args[0] === "!روم") {
     if (!isKing(userId)) return;
     bankChannelId = message.channel.id;
-
-    const embed = new EmbedBuilder()
-      .setTitle("🏦 روم أوامر البنك")
-      .setColor(0x5865f2)
-      .setDescription(
-        "مرحباً بك في روم أوامر البنك الرسمي!\n\n" +
-        "📌 هنا تقدر تستخدم أوامر البنك وتربح الريالات\n" +
-        "⚠️ كل أمر له كول‑داون من **5 إلى 10 دقايق**\n\n" +
-        "اكتب `-اوامر` لتشوف كل الأوامر المتاحة 👇"
-      )
-      .addFields(
-        { name: "💵 راتب",           value: "اكتب `راتب`",        inline: true },
-        { name: "⛏️ ماين",            value: "اكتب `-ماين`",       inline: true },
-        { name: "🚀 صاروخ",           value: "اكتب `-صاروخ مبلغ`", inline: true },
-        { name: "🎮 لعبة",            value: "اكتب `-لعبه`",       inline: true }
-      )
-      .setFooter({ text: "البنك الرسمي • حظ سعيد!" })
-      .setTimestamp();
-
-    await message.channel.send({ embeds: [embed] });
-    await sendTemp(message, `✅ تم تخصيص هذا الروم كروم أوامر البنك!`);
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  !أبدأ٧٧ — للملك: إعداد التذاكر
-  // ════════════════════════════════════
-  if (cmd === "!أبدأ٧٧") {
-    if (!isKing(userId)) return;
+    // احذف رسالة الملك فوراً
     await message.delete().catch(() => {});
 
-    const askMsg = await message.channel.send({
-      content: `<@${userId}> منشن رتبة الدعم البنك المخصصة للتذاكر 👇`,
-    });
-
-    const filter = m => m.author.id === userId && m.mentions.roles.size > 0;
-    const collector = message.channel.createMessageCollector({ filter, time: 60000, max: 1 });
-
-    collector.on("collect", async m => {
-      const role = m.mentions.roles.first();
-      supportRoleId    = role.id;
-      ticketCategoryId = message.channel.parentId;
-      await m.delete().catch(() => {});
-      await askMsg.delete().catch(() => {});
-
-      const embed = new EmbedBuilder()
-        .setTitle("🏦 دعم البنك الفني")
-        .setDescription(
-          "مرحباً بك في نظام دعم البنك\n\n" +
-          "📌 هذا الروم مخصص لفتح تذاكر الدعم الفني\n" +
-          "🔧 في حال وجود أي خطأ تقني أو استفسار، اضغط على الزر أدناه\n\n" +
-          "⚠️ يُرجى توضيح المشكلة بدقة لتسريع المساعدة"
-        )
-        .setColor(0x2b2d31)
-        .setFooter({ text: "البنك الرسمي • نظام التذاكر" })
-        .setTimestamp();
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("open_ticket")
-          .setLabel("📩 فتح تذكرة دعم")
-          .setStyle(ButtonStyle.Primary)
-      );
-      await message.channel.send({ embeds: [embed], components: [row] });
-    });
-
-    collector.on("end", collected => {
-      if (collected.size === 0) {
-        message.channel.send("⏰ انتهى الوقت، أعد الأمر.")
-          .then(m => setTimeout(() => m.delete().catch(() => {}), 5000));
-      }
-    });
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  أوامر الربح
-  // ════════════════════════════════════
-  if (cmd === "راتب")    return cmdRatib(message);
-  if (cmd === "-ماين")   return cmdMine(message);
-  if (cmd === "-صاروخ")  return cmdSaroukh(message, args);
-  if (cmd === "-لعبه")   return cmdGame(message);
-
-  // ════════════════════════════════════
-  //  -اوامر (للأعضاء)   !اوامر (للملوك)
-  // ════════════════════════════════════
-  if (cmd === "-اوامر") {
-    const embed = buildHelpEmbed(false);
-    embed.setTitle("📋 أوامر الأعضاء — البنك الرسمي");
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-  if (cmd === "!اوامر") {
-    if (!isKing(userId)) return;
-    const embed = buildHelpEmbed(true);
-    embed.setTitle("👑 أوامر الملوك — البنك الرسمي");
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  -رصيد [@منشن]
-  // ════════════════════════════════════
-  if (cmd === "-رصيد") {
-    const target = message.mentions.users.first() || message.author;
     const embed = new EmbedBuilder()
-      .setTitle("🏦 رصيد الحساب")
-      .setColor(0xfee75c)
-      .addFields(
-        { name: "العضو",  value: `<@${target.id}>`,             inline: true },
-        { name: "الرصيد", value: formatAmount(getBalance(target.id)), inline: true }
+      .setTitle("🏦 البنك الرسمي")
+      .setColor(0x5865f2)
+      .setDescription(
+        "**الأوامر :**\n\n" +
+        "> `الوان` — ايموجي — كراش — نرد — زر —\n" +
+        "> `تحدي` — أرقام — لعبة — سلوت — استثمار\n" +
+        "> `تداول` — اكس-او — خمن — فواكه —\n" +
+        "> `اختباء` — مخاطرة — نمط"
       )
-      .setFooter({ text: "البنك الرسمي" })
+      .setFooter({ text: "البنك الرسمي • حظ سعيد 🍀" })
       .setTimestamp();
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  -ارسال @منشن مبلغ — للملوك
-  // ════════════════════════════════════
-  if (cmd === "-ارسال") {
-    if (!isKing(userId)) return;
-    const target = message.mentions.users.first();
-    const amount = parseAmount(args[2]);
-    if (!target || isNaN(amount) || amount <= 0)
-      return sendTemp(message, "❌ الاستخدام: `-ارسال @شخص المبلغ`");
-
-    balances[target.id] = getBalance(target.id) + amount;
-
-    await message.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("💸 تحويل ناجح")
-          .setColor(0x57f287)
-          .addFields(
-            { name: "المستلم",        value: `<@${target.id}>`,                inline: true },
-            { name: "المبلغ",         value: formatAmount(amount),              inline: true },
-            { name: "الرصيد الجديد", value: formatAmount(getBalance(target.id)), inline: true }
-          )
-          .setTimestamp()
-      ]
-    });
-
-    await target.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("💰 وصلك تحويل!")
-          .setColor(0x57f287)
-          .setDescription(
-            `تم إيداع **${formatAmount(amount)}** في حسابك\n` +
-            `رصيدك الحالي: **${formatAmount(getBalance(target.id))}**`
-          )
-          .setTimestamp()
-      ]
-    }).catch(() => {});
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  -سحب @منشن مبلغ — للملوك
-  // ════════════════════════════════════
-  if (cmd === "-سحب") {
-    if (!isKing(userId)) return;
-    const target = message.mentions.users.first();
-    const amount = parseAmount(args[2]);
-    if (!target || isNaN(amount) || amount <= 0)
-      return sendTemp(message, "❌ الاستخدام: `-سحب @شخص المبلغ`");
-    if (getBalance(target.id) < amount)
-      return sendTemp(message, `❌ رصيد <@${target.id}> غير كافٍ`);
-
-    balances[target.id] = getBalance(target.id) - amount;
-
-    await message.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("🏧 سحب")
-          .setColor(0xed4245)
-          .addFields(
-            { name: "العضو",          value: `<@${target.id}>`,                inline: true },
-            { name: "المسحوب",        value: formatAmount(amount),              inline: true },
-            { name: "الرصيد الجديد", value: formatAmount(getBalance(target.id)), inline: true }
-          )
-          .setTimestamp()
-      ]
-    });
-
-    await target.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("🏧 تم سحب من حسابك")
-          .setColor(0xed4245)
-          .setDescription(
-            `تم سحب **${formatAmount(amount)}** من حسابك\n` +
-            `رصيدك الحالي: **${formatAmount(getBalance(target.id))}**`
-          )
-          .setTimestamp()
-      ]
-    }).catch(() => {});
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  -تحويل @منشن مبلغ — للجميع
-  // ════════════════════════════════════
-  if (cmd === "-تحويل") {
-    const target = message.mentions.users.first();
-    const amount = parseAmount(args[2]);
-    if (!target || isNaN(amount) || amount <= 0)
-      return sendTemp(message, "❌ الاستخدام: `-تحويل @شخص المبلغ`");
-    if (target.id === userId)
-      return sendTemp(message, "❌ ما تقدر تحول لنفسك");
-    if (getBalance(userId) < amount)
-      return sendTemp(message, "❌ رصيدك غير كافٍ");
-
-    balances[userId]     = getBalance(userId) - amount;
-    balances[target.id]  = getBalance(target.id) + amount;
-
-    await message.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("💸 تحويل ناجح")
-          .setColor(0x57f287)
-          .addFields(
-            { name: "من",     value: `<@${userId}>`,    inline: true },
-            { name: "إلى",    value: `<@${target.id}>`, inline: true },
-            { name: "المبلغ", value: formatAmount(amount), inline: true }
-          )
-          .setTimestamp()
-      ]
-    });
-
-    await target.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("💰 وصلك تحويل!")
-          .setColor(0x57f287)
-          .setDescription(
-            `حوّل لك <@${userId}> مبلغ **${formatAmount(amount)}**\n` +
-            `رصيدك الحالي: **${formatAmount(getBalance(target.id))}**`
-          )
-          .setTimestamp()
-      ]
-    }).catch(() => {});
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  !مخزنة @منشن مبلغ — للملوك
-  // ════════════════════════════════════
-  if (cmd === "!مخزنة") {
-    if (!isKing(userId)) return;
-    const target = message.mentions.users.first();
-    const amount = parseAmount(args[2]);
-    if (!target || isNaN(amount) || amount <= 0)
-      return sendTemp(message, "❌ الاستخدام: `!مخزنة @شخص المبلغ`");
-
-    storage[target.id] = getStorage(target.id) + amount;
-
-    await message.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("🗄️ تم الحفظ في المخزنة")
-          .setColor(0x5865f2)
-          .addFields(
-            { name: "العضو",          value: `<@${target.id}>`,                inline: true },
-            { name: "المضاف",         value: formatAmount(amount),              inline: true },
-            { name: "إجمالي المخزنة", value: formatAmount(getStorage(target.id)), inline: true }
-          )
-          .setTimestamp()
-      ]
-    });
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  !جيب @منشن مبلغ — للملوك
-  // ════════════════════════════════════
-  if (cmd === "!جيب") {
-    if (!isKing(userId)) return;
-    const target = message.mentions.users.first();
-    const amount = parseAmount(args[2]);
-    if (!target || isNaN(amount) || amount <= 0)
-      return sendTemp(message, "❌ الاستخدام: `!جيب @شخص المبلغ`");
-    if (getStorage(target.id) < amount) {
-      return sendTemp(
-        message,
-        `❌ المبلغ غير كافٍ في الخزنة الخاصة بـ <@${target.id}>\n` +
-        `المتوفر: **${formatAmount(getStorage(target.id))}**`
-      );
-    }
-
-    storage[target.id]   = getStorage(target.id) - amount;
-    balances[target.id]  = getBalance(target.id) + amount;
-
-    await message.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("📦 سحب من المخزنة")
-          .setColor(0x57f287)
-          .addFields(
-            { name: "العضو",            value: `<@${target.id}>`,                inline: true },
-            { name: "المسحوب",          value: formatAmount(amount),              inline: true },
-            { name: "المخزنة المتبقية", value: formatAmount(getStorage(target.id)), inline: true },
-            { name: "الرصيد الجديد",   value: formatAmount(getBalance(target.id)), inline: true }
-          )
-          .setTimestamp()
-      ]
-    });
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  -تعال @منشن — للجميع
-  // ════════════════════════════════════
-  if (cmd === "-تعال") {
-    const target = message.mentions.users.first();
-    if (!target) return sendTemp(message, "❌ الاستخدام: `-تعال @شخص`");
-
-    await target.send(
-      `👋 مرحباً! طلب منك <@${userId}> في سيرفر **${message.guild.name}** أن تحضر!\n` +
-      `📍 الروم: ${message.channel.url}`
-    ).then(() => {
-      sendTemp(message, `✅ تم إشعار <@${target.id}> في الخاص`);
-    }).catch(() => {
-      sendTemp(message, `❌ ما قدرت أوصل لـ <@${target.id}> (أغلق الخاص)`);
-    });
-    return;
-  }
-
-  // ════════════════════════════════════
-  //  -صديق @منشن — للملوك
-  // ════════════════════════════════════
-  if (cmd === "-صديق") {
-    if (!isKing(userId)) return;
-    const target = message.mentions.users.first();
-    if (!target) return sendTemp(message, "❌ الاستخدام: `-صديق @شخص`");
-    if (kings.has(target.id))
-      return sendTemp(message, `ℹ️ <@${target.id}> أصلاً لديه صلاحيات الملك`);
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId(`confirm_friend_${target.id}`)
-        .setLabel("✅ نعم، أؤكد")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId("cancel_friend")
-        .setLabel("❌ إلغاء")
-        .setStyle(ButtonStyle.Danger)
+        .setCustomId("show_bank_commands")
+        .setLabel("‹ اختر القسم")
+        .setStyle(ButtonStyle.Secondary)
     );
 
+    await message.channel.send({ embeds: [embed], components: [row] });
+    return;
+  }
+
+  // ── أوامر البنك تعمل فقط في روم البنك
+  const bankCmds = ["راتب", "الوان", "نهب", "لعبه", "ماين", "صاروخ"];
+  if (bankCmds.includes(args[0]) && bankChannelId && message.channel.id !== bankChannelId) {
+    return sendTemp(message.channel, `❌ استخدم أوامر البنك في <#${bankChannelId}> فقط!`);
+  }
+
+  // ══════════════════════
+  //  راتب
+  // ══════════════════════
+  if (args[0] === "راتب") {
+    const cd = checkCooldown(userId, "راتب", (Math.floor(Math.random() * 6) + 5) * 60000);
+    if (!cd.ok) return sendTemp(message.channel, `⏳ <@${userId}> انتظر **${formatMs(cd.remaining)}** للراتب!`);
+
+    const amount = Math.floor(Math.random() * (1578 - 100 + 1)) + 100;
+    balances[userId] = getBalance(userId) + amount;
+
     await message.channel.send({
-      content:
-        `<@${userId}> هل أنت متأكد أنك تريد منح **<@${target.id}>** صلاحيات الملك؟\n` +
-        `سيصبح قادراً على استخدام جميع الأوامر.`,
-      components: [row],
+      embeds: [new EmbedBuilder()
+        .setTitle("💵 راتبك وصل!")
+        .setColor(0x57f287)
+        .setDescription(`<@${userId}> استلمت **${formatAmount(amount)}**\n🏦 رصيدك: **${formatAmount(getBalance(userId))}**`)
+        .setTimestamp()]
+    });
+    return;
+  }
+
+  // ══════════════════════
+  //  الوان — لعبة الألوان (زي الصورة بالضبط)
+  // ══════════════════════
+  if (args[0] === "الوان") {
+    if (colorSessions[message.channel.id]) {
+      return sendTemp(message.channel, "❌ في لعبة ألوان شغالة الحين!");
+    }
+    const cd = checkCooldown(userId, "الوان", (Math.floor(Math.random() * 6) + 5) * 60000);
+    if (!cd.ok) return sendTemp(message.channel, `⏳ <@${userId}> انتظر **${formatMs(cd.remaining)}**!`);
+
+    const board        = generateColorBoard();
+    const maxAttempts  = 19;
+    const prize        = Math.floor(Math.random() * 1500) + 300;
+
+    // اختر لون هدف عشوائي (ليس الأصفر دائماً لتكون اللعبة ممتعة)
+    const targetColor  = COLOR_LIST[Math.floor(Math.random() * COLOR_LIST.length)];
+    const correctCount = countColor(board, targetColor);
+
+    const boardStr = boardToString(board);
+
+    const embed = new EmbedBuilder()
+      .setTitle("الوان")
+      .setColor(0x2b2d31)
+      .setDescription(boardStr)
+      .addFields(
+        { name: "عدد المحاولات :", value: `0/${maxAttempts}`, inline: true },
+        { name: "⏰ الوقت :", value: "2 دقائق", inline: true }
+      )
+      .setFooter({ text: `💰 الجائزة: ${formatAmount(prize)} | اختر كم مرة يظهر اللون المطلوب!` })
+      .setTimestamp();
+
+    // أزرار الألوان (زي الصورة: 4 في صف + واحد منفرد)
+    const row1 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`cg_${message.channel.id}_purple`).setLabel("🟪").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`cg_${message.channel.id}_yellow`).setLabel("🟨").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`cg_${message.channel.id}_brown`).setLabel("🟫").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`cg_${message.channel.id}_blue`).setLabel("🟦").setStyle(ButtonStyle.Secondary),
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`cg_${message.channel.id}_red`).setLabel("🟥").setStyle(ButtonStyle.Danger),
+    );
+
+    const msg = await message.channel.send({
+      content: `<@${userId}> — **كم عدد ${COLORS[targetColor]} في اللوحة؟**`,
+      embeds: [embed],
+      components: [row1, row2]
+    });
+
+    colorSessions[message.channel.id] = {
+      board, userId,
+      attempts: 0, maxAttempts,
+      target: targetColor,
+      correct: correctCount,
+      prize,
+      startTime: Date.now(),
+      msgId: msg.id,
+    };
+
+    // timeout بعد دقيقتين
+    setTimeout(async () => {
+      if (!colorSessions[message.channel.id] || colorSessions[message.channel.id].msgId !== msg.id) return;
+      delete colorSessions[message.channel.id];
+      await msg.edit({
+        content: null,
+        embeds: [new EmbedBuilder()
+          .setTitle("⏰ انتهى الوقت!")
+          .setColor(0xed4245)
+          .setDescription(`الجواب كان **${correctCount}** خانة ${COLORS[targetColor]}`)
+          .setTimestamp()],
+        components: []
+      }).catch(() => {});
+    }, 2 * 60 * 1000);
+
+    return;
+  }
+
+  // ══════════════════════
+  //  نهب @شخص
+  // ══════════════════════
+  if (args[0] === "نهب") {
+    const target = message.mentions.users.first();
+    if (!target) return sendTemp(message.channel, "❌ الاستخدام: `نهب @شخص`");
+    if (target.id === userId) return sendTemp(message.channel, "❌ ما تنهب نفسك!");
+    if (getBalance(target.id) <= 0) return sendTemp(message.channel, `❌ <@${target.id}> ما عنده رصيد!`);
+
+    const cd = checkCooldown(userId, "نهب", (Math.floor(Math.random() * 6) + 5) * 60000);
+    if (!cd.ok) return sendTemp(message.channel, `⏳ انتظر **${formatMs(cd.remaining)}**!`);
+
+    const success = Math.random() > 0.45;
+    if (success) {
+      const stolen = Math.floor(getBalance(target.id) * (Math.random() * 0.3 + 0.1));
+      balances[userId]    = getBalance(userId) + stolen;
+      balances[target.id] = getBalance(target.id) - stolen;
+      await message.channel.send({
+        embeds: [new EmbedBuilder().setTitle("⚔️ نهب ناجح! 🎉").setColor(0xff9d00)
+          .setDescription(`<@${userId}> نهب <@${target.id}>`)
+          .addFields(
+            { name: "💰 المنهوب", value: formatAmount(stolen), inline: true },
+            { name: "🏦 رصيدك",   value: formatAmount(getBalance(userId)), inline: true }
+          ).setTimestamp()]
+      });
+    } else {
+      const fine = Math.floor(getBalance(userId) * 0.1);
+      balances[userId] = getBalance(userId) - fine;
+      await message.channel.send({
+        embeds: [new EmbedBuilder().setTitle("⚔️ النهب فشل! 😅").setColor(0xed4245)
+          .setDescription(`<@${userId}> انكشف وخسر **${formatAmount(fine)}** كغرامة`)
+          .addFields({ name: "🏦 رصيدك", value: formatAmount(getBalance(userId)), inline: true })
+          .setTimestamp()]
+      });
+    }
+    return;
+  }
+
+  // ══════════════════════
+  //  ماين
+  // ══════════════════════
+  if (args[0] === "ماين") {
+    const cd = checkCooldown(userId, "ماين", (Math.floor(Math.random() * 6) + 5) * 60000);
+    if (!cd.ok) return sendTemp(message.channel, `⏳ انتظر **${formatMs(cd.remaining)}**!`);
+
+    const win    = Math.random() > 0.3;
+    const amount = Math.floor(Math.random() * 850) + 50;
+
+    if (win) {
+      balances[userId] = getBalance(userId) + amount;
+      await message.channel.send({
+        embeds: [new EmbedBuilder().setTitle("⛏️ تعدين ناجح!").setColor(0xfee75c)
+          .setDescription(`<@${userId}> حفرت ولقيت كنز!`)
+          .addFields(
+            { name: "💎 الربح",  value: formatAmount(amount), inline: true },
+            { name: "🏦 الرصيد", value: formatAmount(getBalance(userId)), inline: true }
+          ).setTimestamp()]
+      });
+    } else {
+      const loss = Math.min(Math.floor(Math.random() * 300) + 50, getBalance(userId));
+      balances[userId] = getBalance(userId) - loss;
+      await message.channel.send({
+        embeds: [new EmbedBuilder().setTitle("⛏️ الحفرة انهارت!").setColor(0xed4245)
+          .setDescription(`<@${userId}> خسرت **${formatAmount(loss)}**`)
+          .addFields({ name: "🏦 الرصيد", value: formatAmount(getBalance(userId)), inline: true })
+          .setTimestamp()]
+      });
+    }
+    return;
+  }
+
+  // ══════════════════════
+  //  صاروخ مبلغ
+  // ══════════════════════
+  if (args[0] === "صاروخ") {
+    const bet = parseAmount(args[1]);
+    if (isNaN(bet) || bet <= 0) return sendTemp(message.channel, "❌ الاستخدام: `صاروخ المبلغ`");
+    if (getBalance(userId) < bet) return sendTemp(message.channel, "❌ رصيدك ما يكفي!");
+
+    const cd = checkCooldown(userId, "صاروخ", (Math.floor(Math.random() * 6) + 5) * 60000);
+    if (!cd.ok) return sendTemp(message.channel, `⏳ انتظر **${formatMs(cd.remaining)}**!`);
+
+    const mults = [0, 0.5, 1.5, 2, 2.5, 3];
+    const mult  = mults[Math.floor(Math.random() * mults.length)];
+    const gain  = Math.floor(bet * mult);
+    balances[userId] = getBalance(userId) - bet + gain;
+
+    let color, title;
+    if (mult === 0)     { color = 0xed4245; title = "🚀💥 الصاروخ انفجر!"; }
+    else if (mult < 1)  { color = 0xff9d00; title = "🚀 هبط مبكر..";       }
+    else if (mult >= 3) { color = 0x57f287; title = "🚀🌟 وصل الفضاء!";    }
+    else                { color = 0x57f287; title = "🚀 الصاروخ طار!";     }
+
+    await message.channel.send({
+      embeds: [new EmbedBuilder().setTitle(title).setColor(color)
+        .setDescription(`<@${userId}> ضرب **${mult}x** ← ${formatAmount(gain)}`)
+        .addFields(
+          { name: "💵 الرهان",  value: formatAmount(bet), inline: true },
+          { name: "🏦 الرصيد", value: formatAmount(getBalance(userId)), inline: true }
+        ).setTimestamp()]
+    });
+    return;
+  }
+
+  // ══════════════════════
+  //  لعبه — فردي/زوجي
+  // ══════════════════════
+  if (args[0] === "لعبه") {
+    const cd = checkCooldown(userId, "لعبه", (Math.floor(Math.random() * 6) + 5) * 60000);
+    if (!cd.ok) return sendTemp(message.channel, `⏳ انتظر **${formatMs(cd.remaining)}**!`);
+
+    const n       = Math.floor(Math.random() * 10) + 1;
+    const correct = n % 2 === 0 ? "زوجي" : "فردي";
+    const prize   = Math.floor(Math.random() * 800) + 200;
+
+    const embed = new EmbedBuilder()
+      .setTitle("🎮 لعبة البنك")
+      .setColor(0x5865f2)
+      .setDescription(`<@${userId}> الرقم فردي أو زوجي؟\n💰 الجائزة: **${formatAmount(prize)}**\n⏱️ عندك 20 ثانية!`)
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`game_odd_${message.channel.id}_${userId}_${correct}_${prize}`).setLabel("فردي 🔢").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`game_even_${message.channel.id}_${userId}_${correct}_${prize}`).setLabel("زوجي 🔢").setStyle(ButtonStyle.Success),
+    );
+
+    const msg = await message.channel.send({ embeds: [embed], components: [row] });
+
+    setTimeout(async () => {
+      await msg.edit({
+        embeds: [new EmbedBuilder().setTitle("⏰ انتهى الوقت!").setColor(0xed4245)
+          .setDescription(`الجواب كان **${correct}** (الرقم: ${n})`).setTimestamp()],
+        components: []
+      }).catch(() => {});
+    }, 20000);
+    return;
+  }
+
+  // ══════════════════════════════════════════════
+  //  أوامر الملوك
+  // ══════════════════════════════════════════════
+
+  // !أبدأ٧٧
+  if (args[0] === "!أبدأ٧٧") {
+    if (!isKing(userId)) return;
+    await message.delete().catch(() => {});
+    const askMsg = await message.channel.send({ content: `<@${userId}> منشن رتبة الدعم 👇` });
+    const filter = m => m.author.id === userId && m.mentions.roles.size > 0;
+    const collector = message.channel.createMessageCollector({ filter, time: 60000, max: 1 });
+    collector.on("collect", async m => {
+      supportRoleId    = m.mentions.roles.first().id;
+      ticketCategoryId = message.channel.parentId;
+      await m.delete().catch(() => {});
+      await askMsg.delete().catch(() => {});
+      const embed = new EmbedBuilder()
+        .setTitle("🏦 دعم البنك الفني")
+        .setDescription("📌 اضغط الزر أدناه لفتح تذكرة دعم\n⚠️ وضّح مشكلتك بدقة")
+        .setColor(0x2b2d31).setFooter({ text: "البنك الرسمي • التذاكر" }).setTimestamp();
+      await message.channel.send({
+        embeds: [embed],
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("open_ticket").setLabel("📩 فتح تذكرة دعم").setStyle(ButtonStyle.Primary)
+        )]
+      });
+    });
+    collector.on("end", collected => {
+      if (!collected.size) sendTemp(message.channel, "⏰ انتهى الوقت، أعد الأمر.");
+    });
+    return;
+  }
+
+  // -ارسال
+  if (args[0] === "-ارسال") {
+    if (!isKing(userId)) return;
+    const target = message.mentions.users.first();
+    const amount = parseAmount(args[2]);
+    if (!target || isNaN(amount) || amount <= 0) return sendTemp(message.channel, "❌ `-ارسال @شخص مبلغ`");
+    balances[target.id] = getBalance(target.id) + amount;
+    await message.channel.send({
+      embeds: [new EmbedBuilder().setTitle("💸 تحويل ناجح").setColor(0x57f287)
+        .addFields(
+          { name: "المستلم", value: `<@${target.id}>`, inline: true },
+          { name: "المبلغ",  value: formatAmount(amount), inline: true },
+          { name: "الرصيد الجديد", value: formatAmount(getBalance(target.id)), inline: true }
+        ).setTimestamp()]
+    });
+    await target.send({ embeds: [new EmbedBuilder().setTitle("💰 وصلك تحويل!").setColor(0x57f287)
+      .setDescription(`إيداع **${formatAmount(amount)}**\nرصيدك: **${formatAmount(getBalance(target.id))}**`).setTimestamp()] }).catch(() => {});
+    return;
+  }
+
+  // -سحب
+  if (args[0] === "-سحب") {
+    if (!isKing(userId)) return;
+    const target = message.mentions.users.first();
+    const amount = parseAmount(args[2]);
+    if (!target || isNaN(amount) || amount <= 0) return sendTemp(message.channel, "❌ `-سحب @شخص مبلغ`");
+    if (getBalance(target.id) < amount) return sendTemp(message.channel, `❌ رصيد <@${target.id}> غير كافٍ`);
+    balances[target.id] = getBalance(target.id) - amount;
+    await message.channel.send({
+      embeds: [new EmbedBuilder().setTitle("🏧 سحب").setColor(0xed4245)
+        .addFields(
+          { name: "العضو",   value: `<@${target.id}>`, inline: true },
+          { name: "المسحوب", value: formatAmount(amount), inline: true },
+          { name: "الرصيد الجديد", value: formatAmount(getBalance(target.id)), inline: true }
+        ).setTimestamp()]
+    });
+    return;
+  }
+
+  // -رصيد
+  if (args[0] === "-رصيد") {
+    const target = message.mentions.users.first() || message.author;
+    await message.channel.send({
+      embeds: [new EmbedBuilder().setTitle("🏦 رصيد الحساب").setColor(0xfee75c)
+        .addFields(
+          { name: "العضو",  value: `<@${target.id}>`, inline: true },
+          { name: "الرصيد", value: formatAmount(getBalance(target.id)), inline: true }
+        ).setFooter({ text: "البنك الرسمي" }).setTimestamp()]
+    });
+    return;
+  }
+
+  // -تحويل
+  if (args[0] === "-تحويل") {
+    const target = message.mentions.users.first();
+    const amount = parseAmount(args[2]);
+    if (!target || isNaN(amount) || amount <= 0) return sendTemp(message.channel, "❌ `-تحويل @شخص مبلغ`");
+    if (target.id === userId) return sendTemp(message.channel, "❌ ما تحول لنفسك");
+    if (getBalance(userId) < amount) return sendTemp(message.channel, "❌ رصيدك غير كافٍ");
+    balances[userId]    = getBalance(userId) - amount;
+    balances[target.id] = getBalance(target.id) + amount;
+    await message.channel.send({
+      embeds: [new EmbedBuilder().setTitle("💸 تحويل ناجح").setColor(0x57f287)
+        .addFields(
+          { name: "من",     value: `<@${userId}>`,    inline: true },
+          { name: "إلى",    value: `<@${target.id}>`, inline: true },
+          { name: "المبلغ", value: formatAmount(amount), inline: true }
+        ).setTimestamp()]
+    });
+    await target.send({ embeds: [new EmbedBuilder().setTitle("💰 وصلك تحويل!").setColor(0x57f287)
+      .setDescription(`حوّل لك <@${userId}> **${formatAmount(amount)}**\nرصيدك: **${formatAmount(getBalance(target.id))}**`).setTimestamp()] }).catch(() => {});
+    return;
+  }
+
+  // !مخزنة
+  if (args[0] === "!مخزنة") {
+    if (!isKing(userId)) return;
+    const target = message.mentions.users.first();
+    const amount = parseAmount(args[2]);
+    if (!target || isNaN(amount) || amount <= 0) return sendTemp(message.channel, "❌ `!مخزنة @شخص مبلغ`");
+    storage[target.id] = getStorage(target.id) + amount;
+    await message.channel.send({
+      embeds: [new EmbedBuilder().setTitle("🗄️ تم الحفظ في المخزنة").setColor(0x5865f2)
+        .addFields(
+          { name: "العضو", value: `<@${target.id}>`, inline: true },
+          { name: "المضاف", value: formatAmount(amount), inline: true },
+          { name: "إجمالي المخزنة", value: formatAmount(getStorage(target.id)), inline: true }
+        ).setTimestamp()]
+    });
+    return;
+  }
+
+  // !جيب
+  if (args[0] === "!جيب") {
+    if (!isKing(userId)) return;
+    const target = message.mentions.users.first();
+    const amount = parseAmount(args[2]);
+    if (!target || isNaN(amount) || amount <= 0) return sendTemp(message.channel, "❌ `!جيب @شخص مبلغ`");
+    if (getStorage(target.id) < amount)
+      return sendTemp(message.channel, `❌ المخزنة ما تكفي!\nالمتوفر: **${formatAmount(getStorage(target.id))}**`);
+    storage[target.id]  = getStorage(target.id) - amount;
+    balances[target.id] = getBalance(target.id) + amount;
+    await message.channel.send({
+      embeds: [new EmbedBuilder().setTitle("📦 سحب من المخزنة").setColor(0x57f287)
+        .addFields(
+          { name: "العضو",  value: `<@${target.id}>`, inline: true },
+          { name: "المسحوب", value: formatAmount(amount), inline: true },
+          { name: "المخزنة المتبقية", value: formatAmount(getStorage(target.id)), inline: true },
+          { name: "الرصيد الجديد", value: formatAmount(getBalance(target.id)), inline: true }
+        ).setTimestamp()]
+    });
+    return;
+  }
+
+  // -تعال
+  if (args[0] === "-تعال") {
+    const target = message.mentions.users.first();
+    if (!target) return sendTemp(message.channel, "❌ `-تعال @شخص`");
+    await target.send(`👋 طلب منك <@${userId}> في **${message.guild.name}**!\n📍 ${message.channel.url}`)
+      .then(() => sendTemp(message.channel, `✅ تم إشعار <@${target.id}>`))
+      .catch(() => sendTemp(message.channel, `❌ ما قدرت أوصل لـ <@${target.id}>`));
+    return;
+  }
+
+  // -صديق
+  if (args[0] === "-صديق") {
+    if (!isKing(userId)) return;
+    const target = message.mentions.users.first();
+    if (!target) return sendTemp(message.channel, "❌ `-صديق @شخص`");
+    if (kings.has(target.id)) return sendTemp(message.channel, `ℹ️ <@${target.id}> أصلاً ملك`);
+    await message.channel.send({
+      content: `<@${userId}> تأكيد منح **<@${target.id}>** صلاحيات الملك؟`,
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`confirm_friend_${target.id}`).setLabel("✅ نعم").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("cancel_friend").setLabel("❌ إلغاء").setStyle(ButtonStyle.Danger)
+      )]
+    });
+    return;
+  }
+
+  // -اوامر
+  if (args[0] === "-اوامر") {
+    await message.channel.send({
+      embeds: [new EmbedBuilder()
+        .setTitle("📋 أوامر الأعضاء")
+        .setColor(0x5865f2)
+        .setDescription(
+          "**أوامر البنك (في روم البنك):**\n" +
+          "`راتب` — راتب 100–1578 ريال\n" +
+          "`الوان` — لعبة تخمين الألوان 🎨\n" +
+          "`نهب @شخص` — انهب شخص\n" +
+          "`ماين` — تعدين\n" +
+          "`صاروخ مبلغ` — راهن واضرب\n" +
+          "`لعبه` — فردي أو زوجي\n\n" +
+          "**أوامر عامة:**\n" +
+          "`-رصيد [@شخص]` — اعرض الرصيد\n" +
+          "`-تحويل @شخص مبلغ` — حوّل رصيد\n" +
+          "`-تعال @شخص` — استدعاء شخص"
+        )
+        .setFooter({ text: "⚠️ كل أمر ربح له كول‐داون 5–10 دقايق" })
+        .setTimestamp()]
+    });
+    return;
+  }
+
+  // !اوامر
+  if (args[0] === "!اوامر") {
+    if (!isKing(userId)) return;
+    await message.channel.send({
+      embeds: [new EmbedBuilder()
+        .setTitle("👑 أوامر الملوك")
+        .setColor(0xfee75c)
+        .setDescription(
+          "`!روم` — تخصيص الروم للبنك\n" +
+          "`!أبدأ٧٧` — إعداد روم التذاكر\n" +
+          "`-ارسال @شخص مبلغ` — إرسال رصيد\n" +
+          "`-سحب @شخص مبلغ` — سحب رصيد\n" +
+          "`!مخزنة @شخص مبلغ` — حفظ في الخزنة\n" +
+          "`!جيب @شخص مبلغ` — سحب من الخزنة\n" +
+          "`-صديق @شخص` — منح صلاحيات الملك"
+        )
+        .setTimestamp()]
     });
     return;
   }
 });
 
-// ════════════════════════════════════════
-//   تفاعلات الأزرار والمودالز
-// ════════════════════════════════════════
+// ══════════════════════════════════════════════
+//  interactionCreate
+// ══════════════════════════════════════════════
 client.on("interactionCreate", async (interaction) => {
+
+  // ── زر "اختر القسم" (من !روم embed)
+  if (interaction.isButton() && interaction.customId === "show_bank_commands") {
+    await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle("📋 أوامر البنك")
+        .setColor(0x5865f2)
+        .setDescription(
+          "`راتب` — احصل على راتبك اليومي\n" +
+          "`الوان` — لعبة تخمين الألوان 🎨\n" +
+          "`نهب @شخص` — انهب أحد الأعضاء\n" +
+          "`ماين` — تعدين واكسب ريالات\n" +
+          "`صاروخ مبلغ` — راهن واضرب\n" +
+          "`لعبه` — فردي أو زوجي\n" +
+          "`-رصيد` — شوف رصيدك\n" +
+          "`-تحويل @شخص مبلغ` — حوّل لأحد"
+        )
+        .setFooter({ text: "⚠️ كل أمر له كول‐داون 5–10 دقايق" })],
+      ephemeral: true
+    });
+    return;
+  }
 
   // ── تأكيد الصديق
   if (interaction.isButton() && interaction.customId.startsWith("confirm_friend_")) {
@@ -728,159 +674,225 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "❌ ليس لديك صلاحية", ephemeral: true });
     const targetId = interaction.customId.replace("confirm_friend_", "");
     kings.add(targetId);
-    await interaction.update({
-      content: `✅ تم منح <@${targetId}> صلاحيات الملك بنجاح!`,
-      components: [],
-    });
+    await interaction.update({ content: `✅ تم منح <@${targetId}> صلاحيات الملك!`, components: [] });
     return;
   }
-
   if (interaction.isButton() && interaction.customId === "cancel_friend") {
-    await interaction.update({ content: "❌ تم إلغاء العملية", components: [] });
+    await interaction.update({ content: "❌ إلغاء", components: [] });
     return;
   }
 
-  // ── فتح التذكرة: مودال
-  if (interaction.isButton() && interaction.customId === "open_ticket") {
-    const modal = new ModalBuilder()
-      .setCustomId("ticket_modal")
-      .setTitle("فتح تذكرة دعم");
+  // ── لعبة الألوان — الأزرار (cg_ = color guess)
+  if (interaction.isButton() && interaction.customId.startsWith("cg_")) {
+    const parts     = interaction.customId.split("_");
+    const channelId = parts[1];
+    const chosen    = parts[2]; // اللون المختار
+    const session   = colorSessions[channelId];
 
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("ticket_reason")
-          .setLabel("اكتب سبب فتحك للتذكرة")
-          .setStyle(TextInputStyle.Paragraph)
-          .setPlaceholder("اشرح مشكلتك أو استفسارك بالتفصيل...")
-          .setRequired(true)
-          .setMinLength(10)
-          .setMaxLength(1000)
-      )
-    );
+    if (!session) return interaction.reply({ content: "❌ اللعبة انتهت", ephemeral: true });
+    if (interaction.user.id !== session.userId)
+      return interaction.reply({ content: "❌ مو لعبتك!", ephemeral: true });
+
+    session.attempts++;
+
+    const boardStr = boardToString(session.board);
+
+    if (chosen === session.target) {
+      // ✅ أصاب اللون الصح
+      delete colorSessions[channelId];
+      balances[session.userId] = getBalance(session.userId) + session.prize;
+      const timeTaken = Math.floor((Date.now() - session.startTime) / 1000);
+
+      await interaction.update({
+        content: null,
+        embeds: [new EmbedBuilder()
+          .setTitle("🎨 صح! ربحت! 🎉")
+          .setColor(0x57f287)
+          .setDescription(
+            boardStr + "\n\n" +
+            `<@${session.userId}> اخترت ${COLORS[session.target]} ✅\n` +
+            `عدد خانات ${COLORS[session.target]}: **${session.correct}**\n` +
+            `💰 ربحت **${formatAmount(session.prize)}**\n` +
+            `🏦 رصيدك: **${formatAmount(getBalance(session.userId))}**\n` +
+            `⏱️ في ${timeTaken} ثانية | المحاولات: ${session.attempts}/${session.maxAttempts}`
+          )
+          .setTimestamp()],
+        components: []
+      });
+
+    } else if (session.attempts >= session.maxAttempts) {
+      // ❌ نفدت المحاولات
+      delete colorSessions[channelId];
+      await interaction.update({
+        content: null,
+        embeds: [new EmbedBuilder()
+          .setTitle("❌ خسرت! نفدت المحاولات")
+          .setColor(0xed4245)
+          .setDescription(
+            boardStr + "\n\n" +
+            `اللون الصح كان ${COLORS[session.target]} (${session.correct} خانة)`
+          )
+          .setTimestamp()],
+        components: []
+      });
+
+    } else {
+      // ❌ غلط لكن في محاولات باقية
+      const boardEmbed = new EmbedBuilder()
+        .setTitle("الوان")
+        .setColor(0x2b2d31)
+        .setDescription(boardStr)
+        .addFields(
+          { name: "عدد المحاولات :", value: `${session.attempts}/${session.maxAttempts}`, inline: true },
+          { name: "⏰ الوقت :", value: "2 دقائق", inline: true }
+        )
+        .setFooter({ text: `❌ ${COLORS[chosen]} غلط! الجائزة: ${formatAmount(session.prize)}` })
+        .setTimestamp();
+
+      const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`cg_${channelId}_purple`).setLabel("🟪").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`cg_${channelId}_yellow`).setLabel("🟨").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`cg_${channelId}_brown`).setLabel("🟫").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`cg_${channelId}_blue`).setLabel("🟦").setStyle(ButtonStyle.Secondary),
+      );
+      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`cg_${channelId}_red`).setLabel("🟥").setStyle(ButtonStyle.Danger),
+      );
+
+      await interaction.update({
+        content: `<@${session.userId}> — **كم عدد ${COLORS[session.target]} في اللوحة؟**`,
+        embeds: [boardEmbed],
+        components: [row1, row2]
+      });
+    }
+    return;
+  }
+
+  // ── لعبه فردي/زوجي
+  if (interaction.isButton() && (interaction.customId.startsWith("game_odd_") || interaction.customId.startsWith("game_even_"))) {
+    const parts   = interaction.customId.split("_");
+    const guess   = parts[1] === "odd" ? "فردي" : "زوجي";
+    const ownerId = parts[3];
+    const correct = parts[4];
+    const prize   = parseInt(parts[5]);
+
+    if (interaction.user.id !== ownerId)
+      return interaction.reply({ content: "❌ مو لعبتك!", ephemeral: true });
+
+    if (guess === correct) {
+      balances[ownerId] = getBalance(ownerId) + prize;
+      await interaction.update({
+        embeds: [new EmbedBuilder().setTitle("🎉 صح! ربحت!").setColor(0x57f287)
+          .setDescription(`<@${ownerId}> اخترت **${guess}** وكان صح!\n💰 ربحت **${formatAmount(prize)}**\n🏦 رصيدك: **${formatAmount(getBalance(ownerId))}**`)
+          .setTimestamp()],
+        components: []
+      });
+    } else {
+      const loss = Math.floor(prize * 0.5);
+      balances[ownerId] = Math.max(0, getBalance(ownerId) - loss);
+      await interaction.update({
+        embeds: [new EmbedBuilder().setTitle("❌ غلط! خسرت!").setColor(0xed4245)
+          .setDescription(`<@${ownerId}> اخترت **${guess}** لكن الجواب **${correct}**!\nخسرت **${formatAmount(loss)}**\n🏦 رصيدك: **${formatAmount(getBalance(ownerId))}**`)
+          .setTimestamp()],
+        components: []
+      });
+    }
+    return;
+  }
+
+  // ── فتح التذكرة
+  if (interaction.isButton() && interaction.customId === "open_ticket") {
+    const modal = new ModalBuilder().setCustomId("ticket_modal").setTitle("فتح تذكرة دعم");
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId("ticket_reason").setLabel("سبب فتحك للتذكرة")
+        .setStyle(TextInputStyle.Paragraph).setPlaceholder("اشرح مشكلتك...").setRequired(true).setMinLength(10).setMaxLength(1000)
+    ));
     await interaction.showModal(modal);
     return;
   }
 
-  // ── استلام المودال وإنشاء روم التذكرة
+  // ── استلام المودال وإنشاء التذكرة
   if (interaction.isModalSubmit() && interaction.customId === "ticket_modal") {
     const reason = interaction.fields.getTextInputValue("ticket_reason");
     const user   = interaction.user;
     const guild  = interaction.guild;
-
     ticketCounter++;
-    const ticketNum     = String(ticketCounter).padStart(4, "0");
-    const channelName   = `𝗧𝗶𝗰𝗸𝗲𝘁-${ticketNum}-${user.username}`.slice(0, 100);
+    const ticketNum   = String(ticketCounter).padStart(4, "0");
+    const channelName = `Ticket-${ticketNum}-${user.username}`.slice(0, 100);
 
-    const permissionOverwrites = [
-      { id: guild.id,        deny:  [PermissionsBitField.Flags.ViewChannel] },
-      { id: user.id,         allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
-      { id: client.user.id,  allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] },
+    const perms = [
+      { id: guild.id,       deny:  [PermissionsBitField.Flags.ViewChannel] },
+      { id: user.id,        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+      { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] },
     ];
-    if (supportRoleId) {
-      permissionOverwrites.push({
-        id: supportRoleId,
-        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageMessages],
-      });
-    }
+    if (supportRoleId) perms.push({
+      id: supportRoleId,
+      allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageMessages]
+    });
 
     let ticketChannel;
     try {
-      ticketChannel = await guild.channels.create({
-        name: channelName,
-        type: ChannelType.GuildText,
-        parent: ticketCategoryId || null,
-        permissionOverwrites,
-      });
+      ticketChannel = await guild.channels.create({ name: channelName, type: ChannelType.GuildText, parent: ticketCategoryId || null, permissionOverwrites: perms });
     } catch {
-      return interaction.reply({
-        content: "❌ حدث خطأ أثناء إنشاء التذكرة، تأكد من صلاحيات البوت",
-        ephemeral: true,
-      });
+      return interaction.reply({ content: "❌ فشل إنشاء التذكرة، تأكد من صلاحيات البوت", ephemeral: true });
     }
-
-    const ticketEmbed = new EmbedBuilder()
-      .setTitle(`📋 تذكرة #${ticketNum}`)
-      .setColor(0x5865f2)
-      .setDescription(`مرحباً <@${user.id}>! تم فتح تذكرتك\n\n**سبب التذكرة:**\n${reason}`)
-      .addFields({ name: "الحالة", value: "🟡 قيد الانتظار", inline: true })
-      .setFooter({ text: `التذكرة #${ticketNum}` })
-      .setTimestamp();
 
     const ticketRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`ping_owner_${ticketChannel.id}`).setLabel("📢 منشن الأونر").setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId(`ping_support_${ticketChannel.id}`).setLabel("🔔 منشن الدعم").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId(`claim_ticket_${ticketChannel.id}`).setLabel("✋ استلام").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`delete_ticket_${ticketChannel.id}`).setLabel("🗑️ حذف التذكرة").setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId(`delete_ticket_${ticketChannel.id}`).setLabel("🗑️ حذف").setStyle(ButtonStyle.Secondary)
     );
 
-    const supportMention = supportRoleId ? `<@&${supportRoleId}>` : "";
-    await ticketChannel.send({ content: `${supportMention} <@${user.id}>`, embeds: [ticketEmbed], components: [ticketRow] });
-    await interaction.reply({ content: `✅ تم فتح تذكرتك في ${ticketChannel}`, ephemeral: true });
+    await ticketChannel.send({
+      content: `${supportRoleId ? `<@&${supportRoleId}>` : ""} <@${user.id}>`,
+      embeds: [new EmbedBuilder().setTitle(`📋 تذكرة #${ticketNum}`).setColor(0x5865f2)
+        .setDescription(`مرحباً <@${user.id}>!\n\n**السبب:**\n${reason}`)
+        .addFields({ name: "الحالة", value: "🟡 قيد الانتظار", inline: true })
+        .setFooter({ text: `#${ticketNum}` }).setTimestamp()],
+      components: [ticketRow]
+    });
+    await interaction.reply({ content: `✅ تذكرتك في ${ticketChannel}`, ephemeral: true });
     return;
   }
 
-  // ── منشن الدعم (مرة واحدة للأعضاء)
+  // ── أزرار التذكرة
   if (interaction.isButton() && interaction.customId.startsWith("ping_support_")) {
-    if (!supportRoleId)
-      return interaction.reply({ content: "❌ رتبة الدعم غير محددة", ephemeral: true });
-
+    if (!supportRoleId) return interaction.reply({ content: "❌ رتبة الدعم غير محددة", ephemeral: true });
     const key = `pinged_${interaction.channel.id}_${interaction.user.id}`;
     if (!isKing(interaction.user.id) && !hasRole(interaction, supportRoleId)) {
-      if (global[key])
-        return interaction.reply({ content: "❌ لا يمكنك منشنة الدعم أكثر من مرة", ephemeral: true });
+      if (global[key]) return interaction.reply({ content: "❌ مرة واحدة فقط", ephemeral: true });
       global[key] = true;
     }
     await interaction.reply({ content: `<@&${supportRoleId}>` });
     return;
   }
-
-  // ── منشن الأونر (للدعم فقط)
   if (interaction.isButton() && interaction.customId.startsWith("ping_owner_")) {
     if (!hasRole(interaction, supportRoleId) && !isKing(interaction.user.id))
-      return interaction.reply({ content: "❌ هذا الزر للدعم فقط", ephemeral: true });
-    const mentions = [...kings].map(id => `<@${id}>`).join(" ");
-    await interaction.reply({ content: `${mentions} 📢 طلب من الدعم` });
+      return interaction.reply({ content: "❌ للدعم فقط", ephemeral: true });
+    await interaction.reply({ content: `${[...kings].map(id => `<@${id}>`).join(" ")} 📢` });
     return;
   }
-
-  // ── استلام التذكرة (للدعم فقط)
   if (interaction.isButton() && interaction.customId.startsWith("claim_ticket_")) {
     if (!hasRole(interaction, supportRoleId) && !isKing(interaction.user.id))
-      return interaction.reply({ content: "❌ هذا الزر للدعم فقط", ephemeral: true });
-    await interaction.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x57f287)
-          .setDescription(`✅ تم استلام التذكرة من قِبَل <@${interaction.user.id}>`)
-      ]
-    });
+      return interaction.reply({ content: "❌ للدعم فقط", ephemeral: true });
+    await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x57f287).setDescription(`✅ استلم <@${interaction.user.id}>`)] });
     return;
   }
-
-  // ── حذف التذكرة (للدعم فقط)
   if (interaction.isButton() && interaction.customId.startsWith("delete_ticket_")) {
     if (!hasRole(interaction, supportRoleId) && !isKing(interaction.user.id))
-      return interaction.reply({ content: "❌ هذا الزر للدعم فقط", ephemeral: true });
-    await interaction.reply({ content: "🗑️ سيتم حذف التذكرة خلال 5 ثوانٍ..." });
+      return interaction.reply({ content: "❌ للدعم فقط", ephemeral: true });
+    await interaction.reply({ content: "🗑️ حذف خلال 5 ثوانٍ..." });
     setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
     return;
   }
 });
 
-// ════════════════════════════════════════
-//   سيرفر وهمي لـ Render (Web Service)
-// ════════════════════════════════════════
-const http = require("http");
+// ══════════════════════════════════════════════
+//  HTTP Server (لـ Render)
+// ══════════════════════════════════════════════
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("Bot is running!");
-}).listen(PORT, () => {
-  console.log(`🌐 HTTP server listening on port ${PORT}`);
-});
+http.createServer((req, res) => { res.writeHead(200); res.end("Bot is running!"); })
+  .listen(PORT, () => console.log(`🌐 HTTP on port ${PORT}`));
 
-// ════════════════════════════════════════
-//   تشغيل البوت
-// ════════════════════════════════════════
 client.login(process.env.DISCORD_TOKEN);
